@@ -43,6 +43,77 @@ func createDummyBackendServer() *httptest.Server {
 	}))
 }
 
+func TestProxyRouter_AuthenticationChallenge(t *testing.T) {
+	privateKey, publicKey, err := generateRSAKeyPair()
+	require.NoError(t, err)
+	gin.SetMode(gin.TestMode)
+
+	for _, externalURL := range []string{"https://example.com", "https://example.com/"} {
+		t.Run(externalURL, func(t *testing.T) {
+			validToken, err := createJWT(privateKey, jwt.MapClaims{
+				"iss": externalURL,
+				"aud": externalURL,
+				"exp": time.Now().Add(time.Hour).Unix(),
+			})
+			require.NoError(t, err)
+			expiredToken, err := createJWT(privateKey, jwt.MapClaims{
+				"iss": externalURL,
+				"aud": externalURL,
+				"exp": time.Now().Add(-time.Hour).Unix(),
+			})
+			require.NoError(t, err)
+			wrongAudienceToken, err := createJWT(privateKey, jwt.MapClaims{
+				"iss": externalURL,
+				"aud": "https://other.example.com",
+				"exp": time.Now().Add(time.Hour).Unix(),
+			})
+			require.NoError(t, err)
+
+			challenge := `Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource"`
+			invalidChallenge := challenge + `, error="invalid_token"`
+			cases := []struct {
+				name          string
+				authorization string
+				backendStatus int
+				status        int
+				challenge     string
+				body          string
+			}{
+				{"missing credentials", "", http.StatusOK, http.StatusUnauthorized, challenge, `{"error":"Unauthorized"}`},
+				{"non-Bearer credentials", "Basic credentials", http.StatusOK, http.StatusUnauthorized, challenge, `{"error":"Unauthorized"}`},
+				{"malformed token", "Bearer invalid", http.StatusOK, http.StatusUnauthorized, invalidChallenge, `{"error":"Invalid token"}`},
+				{"expired token", "Bearer " + expiredToken, http.StatusOK, http.StatusUnauthorized, invalidChallenge, `{"error":"Invalid token"}`},
+				{"wrong audience", "Bearer " + wrongAudienceToken, http.StatusOK, http.StatusUnauthorized, invalidChallenge, `{"error":"Invalid token"}`},
+				{"valid token", "Bearer " + validToken, http.StatusOK, http.StatusOK, "", "backend response"},
+				{"backend unauthorized", "Bearer " + validToken, http.StatusUnauthorized, http.StatusUnauthorized, "", "backend response"},
+			}
+			for _, tt := range cases {
+				t.Run(tt.name, func(t *testing.T) {
+					backendCalled := false
+					backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						backendCalled = true
+						w.WriteHeader(tt.backendStatus)
+						fmt.Fprint(w, "backend response")
+					})
+					proxyRouter, err := NewProxyRouter(externalURL, backend, publicKey, http.Header{}, false, false, nil, "/userinfo")
+					require.NoError(t, err)
+					router := gin.New()
+					proxyRouter.SetupRoutes(router)
+					req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+					req.Header.Set("Authorization", tt.authorization)
+					w := httptest.NewRecorder()
+					router.ServeHTTP(w, req)
+
+					assert.Equal(t, tt.status, w.Code)
+					assert.Equal(t, tt.challenge, w.Header().Get("WWW-Authenticate"))
+					assert.Equal(t, tt.body, w.Body.String())
+					assert.Equal(t, tt.challenge == "", backendCalled)
+				})
+			}
+		})
+	}
+}
+
 func TestProxyRouter_RejectsWrongIssuerOrAudience(t *testing.T) {
 	privateKey, publicKey, err := generateRSAKeyPair()
 	require.NoError(t, err)

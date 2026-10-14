@@ -68,6 +68,7 @@ func (p *ProxyRouter) handleProtectedResource(c *gin.Context) {
 func (p *ProxyRouter) handleProxy(c *gin.Context) {
 	authHeader := c.Request.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
+		c.Header("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s%s"`, strings.TrimRight(p.externalURL, "/"), OauthProtectedResourceEndpoint))
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -82,6 +83,7 @@ func (p *ProxyRouter) handleProxy(c *gin.Context) {
 	}, jwt.WithIssuer(p.externalURL), jwt.WithAudience(p.externalURL))
 
 	if err != nil || !token.Valid {
+		c.Header("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s%s", error="invalid_token"`, strings.TrimRight(p.externalURL, "/"), OauthProtectedResourceEndpoint))
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 		return
 	}
